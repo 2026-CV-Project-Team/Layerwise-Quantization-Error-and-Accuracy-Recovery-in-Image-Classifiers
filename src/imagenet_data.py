@@ -13,6 +13,9 @@
 - rank/test는 클래스 균형으로 뽑는다(rank 클래스당 5장, test 클래스당 10장). val은 클래스당 50장이다.
 - calib은 train 1,024개 묶음 중 고정 seed로 고른 16개 묶음에서 앞 128장씩 가져온다.
   train 전체(약 154GB)를 받지 않으려고 묶음의 앞부분만 스트리밍으로 읽는다.
+- 반복 측정(11-17 추가): 사전학습 모델은 고정이라 실행마다 달라지는 것은 보정 이미지뿐이다.
+  그래서 보정 세트만 seed 1, 2, ...로 새로 뽑아 같은 실험을 다시 한다(rank/test는 그대로).
+  seed 0은 기존 세트 그대로이고, seed가 다르면 묶음이 겹치지 않게 골라 이미지도 겹치지 않는다.
 - 전처리는 모델별 공식 설정을 따른다(같은 원본 이미지, 다른 크기 조정 방식).
   ResNet-18: 짧은 변 256(bilinear) -> 가운데 224. DeiT-Tiny: 짧은 변 248(bicubic) -> 가운데 224.
   공식 설정을 써야 FP32 정확도가 알려진 수치와 비교 가능하기 때문이다.
@@ -90,13 +93,46 @@ def select_val(seed: int = 0) -> dict[str, dict[str, int]]:
     return out
 
 
+# 보정 세트 번호. 0 = 기존 세트(파일 이름 calib). 실험 스크립트의 --calib-seed가 바꾼다
+CALIB_SEED = 0
+
+
+def set_calib_seed(seed: int) -> None:
+    global CALIB_SEED
+    CALIB_SEED = seed
+
+
+def calib_tag(seed: int | None = None) -> str:
+    """보정 세트의 파일 이름 앞부분. seed 0은 기존 이름(calib)을 그대로 써서 예전 결과와 호환된다."""
+    seed = CALIB_SEED if seed is None else seed
+    return "calib" if seed == 0 else f"calib_s{seed}"
+
+
+def calib_shards(seed: int) -> list[int]:
+    """보정 세트 seed가 쓰는 train 묶음 16개.
+
+    seed 0은 기존 방식 그대로(기존 calib 2,048장과 같아야 하므로 바꾸지 않는다).
+    seed 1 이상은 앞 seed들이 쓴 묶음을 빼고 고른다. 묶음마다 앞 128장을 쓰므로
+    묶음이 겹치지 않으면 보정 이미지도 겹치지 않는다.
+    """
+    if seed == 0:
+        return sorted(np.random.default_rng(0).choice(N_TRAIN_SHARDS, CALIB_SHARDS, replace=False).tolist())
+    used = {s for prev in range(seed) for s in calib_shards(prev)}
+    order = np.random.default_rng(seed).permutation(N_TRAIN_SHARDS).tolist()
+    return sorted([s for s in order if s not in used][:CALIB_SHARDS])
+
+
 def fetch_calib(seed: int = 0) -> dict[str, int]:
-    """train 묶음 16개의 앞부분에서 128장씩 스트리밍으로 받아 JPEG로 저장."""
+    """train 묶음 16개의 앞부분에서 128장씩 스트리밍으로 받아 JPEG로 저장.
+
+    seed 0은 data/imagenet/calib/, seed 1 이상은 data/imagenet/calib/s{seed}/에 둔다.
+    """
     from huggingface_hub import HfFileSystem
 
     fs = HfFileSystem()
-    CALIB_DIR.mkdir(parents=True, exist_ok=True)
-    shards = sorted(np.random.default_rng(seed).choice(N_TRAIN_SHARDS, CALIB_SHARDS, replace=False).tolist())
+    folder = CALIB_DIR if seed == 0 else CALIB_DIR / f"s{seed}"
+    folder.mkdir(parents=True, exist_ok=True)
+    shards = calib_shards(seed)
     per_shard = N_CALIB // CALIB_SHARDS
     picked: dict[str, int] = {}
     for shard in shards:
@@ -104,7 +140,7 @@ def fetch_calib(seed: int = 0) -> dict[str, int]:
             for k, (name, label, image) in enumerate(read_samples(f)):
                 if k >= per_shard:
                     break  # 필요한 만큼만 읽고 연결을 닫는다
-                (CALIB_DIR / f"{name}.jpg").write_bytes(image)
+                (folder / f"{name}.jpg").write_bytes(image)
                 picked[name] = label
         print(f"calib 묶음 {shard:04d}: 누적 {len(picked)}장", flush=True)
     return picked
@@ -156,8 +192,30 @@ def build_cache() -> None:
         a.flush()
 
 
+def build_calib_cache(seed: int) -> None:
+    """반복 측정용 보정 세트(seed 1 이상)만 전처리 배열로 만든다. rank/test 배열은 건드리지 않는다."""
+    assert seed > 0, "seed 0은 build_cache()가 만든다"
+    tag, folder = calib_tag(seed), CALIB_DIR / f"s{seed}"
+    items = json.loads((SPLITS / f"imagenet_{tag}.json").read_text())
+    names = sorted(items)
+    CACHE.mkdir(parents=True, exist_ok=True)
+    np.save(CACHE / f"{tag}_y.npy", np.array([items[n] for n in names], dtype=np.int64))
+    for m in PREP:
+        arr = np.lib.format.open_memmap(CACHE / f"{m}_{tag}_x.npy", mode="w+", dtype=np.uint8,
+                                        shape=(len(names), 3, 224, 224))
+        for i, name in enumerate(names):
+            arr[i] = preprocess((folder / f"{name}.jpg").read_bytes(), m)
+        arr.flush()
+    print(tag, "전처리 완료", len(names), flush=True)
+
+
 def load_split(model: str, split: str) -> tuple[torch.Tensor, torch.Tensor]:
-    """(uint8 이미지 텐서, 정답). 이미지는 파일에 매핑된 상태라 메모리를 거의 쓰지 않는다."""
+    """(uint8 이미지 텐서, 정답). 이미지는 파일에 매핑된 상태라 메모리를 거의 쓰지 않는다.
+
+    split이 "calib"이면 현재 보정 세트(set_calib_seed로 정한 것)를 읽는다.
+    """
+    if split == "calib":
+        split = calib_tag()
     x = np.load(CACHE / f"{model}_{split}_x.npy", mmap_mode="r")
     y = np.load(CACHE / f"{split}_y.npy")
     return torch.from_numpy(x), torch.from_numpy(y)
@@ -173,17 +231,23 @@ def main() -> None:
     p = argparse.ArgumentParser()
     p.add_argument("--calib", action="store_true", help="보정용 train 2,048장 받기")
     p.add_argument("--val", action="store_true", help="받아 둔 val 묶음에서 rank/test 목록 만들기")
-    p.add_argument("--cache", action="store_true", help="전처리 배열 만들기")
+    p.add_argument("--cache", action="store_true", help="전처리 배열 만들기 (seed 0이면 전체, 1 이상이면 보정 세트만)")
+    p.add_argument("--calib-seed", type=int, default=0, help="보정 세트 번호 (0 = 기존 세트, 반복 측정용은 1 이상)")
     args = p.parse_args()
     SPLITS.mkdir(parents=True, exist_ok=True)
     if args.calib:
-        (SPLITS / "imagenet_calib.json").write_text(json.dumps(fetch_calib(), indent=0, sort_keys=True))
+        items = fetch_calib(args.calib_seed)
+        # 다른 보정 세트·val과 겹치지 않는지 확인 (val 이름은 ILSVRC2012_val_..., train은 n0... 형식)
+        for prev in range(args.calib_seed):
+            other = json.loads((SPLITS / f"imagenet_{calib_tag(prev)}.json").read_text())
+            assert not set(items) & set(other), f"보정 세트 {prev}와 이미지가 겹침"
+        (SPLITS / f"imagenet_{calib_tag(args.calib_seed)}.json").write_text(json.dumps(items, indent=0, sort_keys=True))
     if args.val:
         for split, items in select_val().items():
             (SPLITS / f"imagenet_{split}.json").write_text(json.dumps(items, indent=0, sort_keys=True))
             print(split, len(items))
     if args.cache:
-        build_cache()
+        build_cache() if args.calib_seed == 0 else build_calib_cache(args.calib_seed)
 
 
 if __name__ == "__main__":

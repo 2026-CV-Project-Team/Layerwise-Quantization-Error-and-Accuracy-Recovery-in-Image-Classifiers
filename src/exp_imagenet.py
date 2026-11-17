@@ -15,7 +15,7 @@ from pathlib import Path
 
 import torch
 
-from .imagenet_data import load_split, to_input
+from .imagenet_data import load_split, set_calib_seed, to_input
 from .imagenet_models import MODELS, load_model
 from .quant.units import UnitQuantizer
 
@@ -86,7 +86,10 @@ def main() -> None:
     p.add_argument("--models", nargs="+", default=list(MODELS))
     p.add_argument("--conditions", nargs="*", default=["W8A8", "W6A6", "W5A5", "W4A4", "W4A8", "W32A4", "W4A32"])
     p.add_argument("--out", default="results/imagenet")
+    # 반복 측정용 보정 세트 번호 (0 = 기존 세트). 결과는 --out으로 다른 폴더에 둔다
+    p.add_argument("--calib-seed", type=int, default=0)
     args = p.parse_args()
+    set_calib_seed(args.calib_seed)
     device = pick_device()
     rows = []
     for name in args.models:
