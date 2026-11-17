@@ -1,20 +1,27 @@
-# 2026 Computer Vision Project
+# 효율적인 층별 양자화 설계
 
-층별 양자화 오차 vs FP32 복원 효과
+층별 오차와 정확도 회복을 분석해 효율적인 양자화 방법을 찾는다.
 
 팀원: 김진서, 이하형, 정채호준
 
 ## 주제
 
-재학습 없이 양자화(PTQ)했을 때, 양자화 오차(NMSE)가 큰 층이랑 FP32로 되돌렸을 때 정확도가 많이 회복되는 층이 같은 층인지 본다.
+6-Conv 예비실험에서는 재학습 없는 양자화(PTQ)를 적용해, 양자화 오차(NMSE)가 큰 층과 FP32로 되돌렸을 때 정확도가 많이 회복되는 층이 같은지 본다.
 오차가 큰 층이 꼭 예측을 망치는 층은 아닐 수 있다는 게 가설.
 
 실험은 두 단계로 나눠서 진행한다.
 
 1. 6-Conv CNN + 3D-Shapes : 직접 학습한 작은 모델. Shape / Color / Scale 속성별로 어느 층이 영향을 주는지 확인 (진행 중)
-2. ResNet-18, DeiT-Tiny + ImageNet-1K : 사전학습 모델에서도 같은 현상이 나오는지 확인 (아직 구현 안 함)
+2. ResNet-18, DeiT-Tiny + ImageNet-1K : 두 모델로 실험을 확장한다. 새로 학습할지 사전학습 가중치를 사용할지는 미정 (아직 구현 안 함)
 
 자세한 설정값은 docs/experiment_spec.md 참고. 아직 확정 안 된 값은 잠정이라고 적어놨음.
+
+## 향후 연구 방향
+
+1. ResNet-18과 DeiT-Tiny에서 실험한다. 신규 학습과 사전학습 모델 사용 중 어느 방식을 택할지는 추후 결정한다.
+2. 현재 방식 외 다른 양자화 기법을 적용해 비교한다.
+3. 비트 수, 대상 층 등 다양한 조건에서 반복 실험한다.
+4. 층 위치와 양자화 기법 등의 조건을 종합해 효율적인 양자화 설계 기법을 제안한다.
 
 ## 환경
 
@@ -49,6 +56,10 @@ python -m src.exp_domain --seeds 0 1 2 3 4
 
 # 결과 집계 -> results/6conv_fold/summary/
 python -m src.analyze --exp results/6conv_fold
+
+# 최종 출력(logit) 오차 (저장된 모델 그대로, seed 하나에 4분 정도) + 집계
+python -m src.exp_output_error --seeds 0 1 2 3 4
+python -m src.output_summary
 
 # 그림 -> results/6conv_fold/figures/ (집계 CSV만 읽음)
 python -m src.figures --exp results/6conv_fold
@@ -190,3 +201,239 @@ Mixed precision은 두 가지로 나눠서 봄 (서로 다른 실험)
 - Blur σ=1.0은 FP32부터 떨어지고(96.43, 주로 Scale) 양자화하면 더 떨어짐
 - 누적 NMSE 순위와 복원 이득 순위가 안 맞는 건 모든 입력에서 똑같이 나옴 (ρ 평균 -0.52 ~ -0.62, 1등 층 겹침 0)
 - 복원 이득 순위 자체는 입력이 바뀌어도 대체로 유지됨 (원본 순위와의 ρ 평균 0.77 ~ 0.99). Conv1이 계속 1등인 경우가 많음
+
+## 최종 출력 오차 (6-Conv, 5 seed)
+
+층별로는 출력 오차(NMSE)를 쟀는데 최종 출력은 정답을 맞혔는지만 봤어서, 최종 출력(과제별 Head의 logit)에서도 FP32랑 얼마나 다른지 쟀다. 저장된 모델과 보정 범위를 그대로 썼고, W4A4 예측이 본 실험 기록이랑 똑같은지 seed마다 확인함.
+
+- 최종 출력 NMSE = ‖z − ẑ‖² / ‖z‖² (z: FP32 logit, ẑ: 양자화 모델 logit). 층별 NMSE랑 같은 식
+- KL = KL(softmax(z) ‖ softmax(ẑ)). 확률이 얼마나 바뀌었는지. 보조 지표로 넣은 거라 잠정
+- Head는 양자화하지 않으니까 최종 출력 오차는 전부 앞 층에서 넘어온 것
+- 최종 출력 오차 감소량 = (전 층 양자화 상태의 최종 출력 NMSE) − (층 i만 FP32로 되돌렸을 때의 최종 출력 NMSE)
+
+조건별 (test 1만 장, 세 과제 평균)
+
+| 조건 | 정확도(%) | 최종 출력 NMSE | KL |
+|---|---|---|---|
+| W8A8 | 100 | 0.0019 ± 0.0010 | 0.0001 |
+| W6A6 | 100 | 0.040 ± 0.019 | 0.002 |
+| W5A5 | 98.68 | 0.142 ± 0.034 | 0.048 |
+| W4A8 | 89.89 | 0.287 ± 0.115 | 0.322 |
+| W4A32 | 89.94 | 0.282 ± 0.116 | 0.319 |
+| W32A4 | 85.69 | 0.475 ± 0.104 | 0.463 |
+| W4A4 | 58.31 | 1.145 ± 0.447 | 2.393 |
+
+W4A4 층별 (rank 1만 장, seed 평균). 전 층 W4A4일 때 최종 출력 NMSE는 1.147
+
+| 층 | 층 누적 NMSE | 복원 이득(%p) | 복원 시 최종 출력 NMSE | 최종 출력 오차 감소량 | 그 층만 양자화했을 때 최종 출력 NMSE |
+|---|---|---|---|---|---|
+| Conv1 | 0.046 | 19.20 | 0.592 | 0.556 | 0.193 |
+| Conv2 | 0.123 | 10.07 | 0.888 | 0.259 | 0.100 |
+| Conv3 | 0.224 | 11.73 | 0.682 | 0.466 | 0.157 |
+| Conv4 | 0.235 | 12.73 | 0.731 | 0.416 | 0.150 |
+| Conv5 | 0.365 | 4.91 | 1.076 | 0.071 | 0.111 |
+| Conv6 | 1.302 | -0.45 | 1.120 | 0.028 | 0.013 |
+
+순위 상관 (W4A4, seed 평균 ρ, 괄호는 |ρ| ≥ 0.886인 seed 수)
+
+| 비교 | ρ |
+|---|---|
+| 층 누적 NMSE vs 최종 출력 오차 감소량 | -0.49 (0/5) |
+| 최종 출력 오차 감소량 vs 복원 이득 | 0.89 (2/5) |
+| KL 감소량 vs 복원 이득 | 0.94 (3/5) |
+| 그 층만 양자화했을 때 최종 출력 KL vs 단독 하락 | 0.99 (5/5) |
+
+- 층 출력 오차가 제일 큰 Conv6은 되돌려도 최종 출력 오차가 거의 안 줄어듦 (1.147 → 1.120). 제일 많이 줄어드는 건 Conv1 (→ 0.592)
+- 최종 출력 오차 감소량 순위는 복원 이득(정확도) 순위랑 잘 맞음. 반대로 층 누적 NMSE 순위랑은 안 맞음
+- 그래서 "층 출력 오차가 큰 층 ≠ 최종 출력을 많이 망가뜨리는 층"이 정확도뿐 아니라 최종 출력 오차로 봐도 같게 나옴
+- W8A8, W6A6은 정확도가 100%라 정확도로는 층 순위를 못 매기는데, 최종 출력 오차로는 매길 수 있음. W6A6에서도 감소량은 Conv1·3·4가 크고 Conv6이 제일 작음(0.0125, 0.0130, 0.0106 vs 0.0018). 다만 값이 작아서 seed 편차가 크다(층 누적 NMSE와의 ρ 0.02 ± 0.72)
+- 전체 표: `results/6conv_fold/summary/output_conditions.csv`, `output_layers.csv`, `output_rank_corr.csv`
+
+## ImageNet 사전학습 모델 (ResNet-18, DeiT-Tiny)
+
+6-Conv에서 본 결과가 실제로 많이 쓰는 모델에서도 나오는지 확인하려고 추가한 실험이다. 재학습 없이 사전학습 가중치를 그대로 쓴다. 아직 1회 측정이고 아래 "잠정" 항목은 팀에서 확정하기 전이다.
+
+### 데이터 받기
+
+Hugging Face [timm/imagenet-1k-wds](https://huggingface.co/datasets/timm/imagenet-1k-wds)를 쓴다. 페이지에서 약관에 동의하고 Read 토큰으로 로그인해야 받을 수 있다.
+
+```bash
+python -c "from huggingface_hub import login; login()"
+
+# val 묶음 받기 (약 7GB) -> data/imagenet/raw
+python -c "from huggingface_hub import snapshot_download; snapshot_download('timm/imagenet-1k-wds', repo_type='dataset', allow_patterns=['imagenet1k-validation-*.tar'], local_dir='data/imagenet/raw')"
+
+# 보정용 train 2,048장 받기, rank/test 목록 만들기, 전처리 배열 만들기
+python -m src.imagenet_data --calib --val --cache
+```
+
+`data/splits/imagenet_*.json`에 우리가 쓴 분할 목록이 들어 있어서, `--calib --val` 없이 `--cache`만 돌려도 같은 이미지를 쓸 수 있다(보정용 JPEG는 따로 받아야 함).
+
+### 실행
+
+```bash
+# FP32 기준 정확도 + 전 단위 동일 비트 조건 (12분 정도)
+python -m src.exp_imagenet
+
+# 단위별 복원·교체 실험 (조건 하나에 5~6분)
+python -m src.exp_imagenet_units --models resnet18 --conditions W4A4 W5A5
+python -m src.exp_imagenet_units --models deit_tiny --conditions W4A4 W5A5 W6A6
+
+# 최종 출력(logit) 오차. 조건별 + 단위별 실험을 돌린 조건 전부 (두 모델 50분 정도) + 집계
+python -m src.exp_imagenet_output --models resnet18 deit_tiny
+python -m src.output_summary
+
+# 정책별 상위 k 단위 8비트 승격 (최종 출력 기준 out, out_kl은 output_units.csv가 있어야 함)
+python -m src.exp_imagenet_mixed --models resnet18 --bases W4A4 W5A5
+python -m src.exp_imagenet_mixed --models deit_tiny --bases W5A5 W6A6
+```
+
+### 설정
+
+| 항목 | 내용 |
+|---|---|
+| 모델 | ResNet-18 (torchvision, IMAGENET1K_V1), DeiT-Tiny (timm `deit_tiny_patch16_224`) |
+| 데이터 | 보정 train 2,048장, rank val 5,000장, test val 10,000장 (서로 안 겹침) |
+| 단위 | ResNet-18: Stem, BasicBlock 8개, FC (10개) / DeiT-Tiny: Patch Embed, Block 12개, Head (14개) |
+| 양자화 | 단위 안의 Conv/Linear 가중치 + 단위 출력 활성값. 규칙은 6-Conv와 같음 (W 대칭 per-channel, A 비대칭 per-tensor min-max) |
+| ResNet BN | Conv에 합친 뒤 보정·양자화 |
+
+잠정으로 둔 것
+
+- 블록 안쪽의 중간 활성값은 양자화하지 않고 블록 출력만 양자화한다.
+- FC/Head는 가중치만 양자화하고 logit은 양자화하지 않는다.
+- Stem 출력은 MaxPool 뒤, Patch Embed 출력은 projection 직후로 본다.
+- rank/test는 클래스 균형으로 뽑았다 (클래스당 5장, 10장).
+- 전처리는 모델별 공식 설정을 따랐다 (ResNet-18: 256 bilinear, DeiT-Tiny: 248 bicubic, 둘 다 가운데 224).
+
+### 결과 (1회 측정)
+
+조건별 top-1 정확도 (test 10,000장, %)
+
+| 조건 | ResNet-18 | DeiT-Tiny |
+|---|---|---|
+| FP32 | 69.19 | 71.90 |
+| W8A8 | 68.94 | 71.47 |
+| W6A6 | 67.25 | 62.33 |
+| W5A5 | 58.52 | 6.75 |
+| W4A4 | 17.13 | 0.13 |
+| W4A8 | 44.28 | 64.07 |
+| W32A4 | 36.58 | 0.11 |
+| W4A32 | 44.30 | 64.36 |
+
+FP32 정확도는 알려진 수치(ResNet-18 69.8%, DeiT-Tiny 72.2%)와 거의 같다. DeiT-Tiny는 활성값을 줄였을 때 훨씬 빨리 무너진다.
+
+ResNet-18 W4A4 단위별 결과 (rank 5,000장, 전체 양자화 16.92%)
+
+| 단위 | 복원 이득 (%p) | 단독 하락 (%p) | 누적 NMSE | 단독 NMSE |
+|---|---|---|---|---|
+| stem | 18.82 | 18.08 | 0.091 | 0.091 |
+| layer1.0 | 5.62 | 5.18 | 0.250 | 0.100 |
+| layer1.1 | 4.38 | 1.90 | 0.439 | 0.091 |
+| layer2.0 | 5.04 | 4.34 | 0.710 | 0.174 |
+| layer2.1 | 4.84 | 1.06 | 0.849 | 0.150 |
+| layer3.0 | 3.14 | 1.44 | 0.876 | 0.141 |
+| layer3.1 | 3.18 | 2.44 | 1.097 | 0.214 |
+| layer4.0 | 2.18 | 1.06 | 1.370 | 0.179 |
+| layer4.1 | 0.54 | 0.20 | 1.498 | 0.205 |
+| fc | 0.64 | 0.62 | 1.171 | 0.027 |
+
+오차 순위와 복원 순위 비교 (rank 5,000장)
+
+| 모델 | 조건 | 전체 양자화 (%) | ρ (누적 NMSE vs 복원 이득) | 복원 이득 상위 3 | 누적 NMSE 상위 3 |
+|---|---|---|---|---|---|
+| ResNet-18 | W4A4 | 16.92 | -0.94 | stem, layer1.0, layer2.0 | layer4.1, layer4.0, fc |
+| ResNet-18 | W5A5 | 60.02 | -0.63 | stem, layer1.0, layer2.0 | layer4.0, layer4.1, layer3.1 |
+| DeiT-Tiny | W4A4 | 0.06 | 0.13 | (전부 0.2%p 이하) | head, block11, block10 |
+| DeiT-Tiny | W5A5 | 6.74 | 0.26 | block9, block8, block11 | head, block11, block10 |
+| DeiT-Tiny | W6A6 | 63.92 | 0.12 | block9, patch_embed, block11 | head, block11, block10 |
+
+- ResNet-18은 6-Conv와 같은 모양이다. 오차는 뒤쪽 단위가 큰데 복원 이득은 Stem이 가장 크다.
+- DeiT-Tiny는 뚜렷한 관계가 없다. W4A4에서는 단위 하나를 복원해도 회복이 안 되고, W6A6의 이득은 1%p 안팎이라 잡음과 구분이 안 된다.
+- 누적 NMSE는 뒤로 갈수록 쌓이는 값이라 깊이와 섞여 있다. 단독 NMSE로 보면 ResNet-18 W4A4의 ρ는 -0.26이다.
+- 전체 표는 `results/imagenet/summary/units.csv`, `rank_corr.csv`에 있다.
+
+아직 안 한 것: 정책 6개(Early-High, Late-High, NMSE, 단독 민감도, 복원 이득, Random)로 상위 1·2·3 단위를 8비트로 올리는 비교, test 평가.
+
+### 최종 출력 오차 (1회 측정)
+
+6-Conv의 최종 출력 오차와 같은 지표(최종 logit의 NMSE, KL). 분류기 logit은 양자화하지 않으므로 오차는 분류기 가중치 양자화와 앞 단위에서 넘어온 것. 단위별 실험의 예측과 같은지 상태마다 확인함.
+
+조건별 (test 10,000장)
+
+| 조건 | ResNet-18 정확도 | ResNet-18 NMSE | ResNet-18 KL | DeiT-Tiny 정확도 | DeiT-Tiny NMSE | DeiT-Tiny KL |
+|---|---|---|---|---|---|---|
+| W8A8 | 68.94 | 0.003 | 0.005 | 71.47 | 0.044 | 0.021 |
+| W6A6 | 67.25 | 0.055 | 0.110 | 62.33 | 0.729 | 0.540 |
+| W5A5 | 58.52 | 0.260 | 0.616 | 6.75 | 2.131 | 4.010 |
+| W4A4 | 17.13 | 1.170 | 4.481 | 0.13 | 2.224 | 5.216 |
+| W4A8 | 44.28 | 0.511 | 1.519 | 64.07 | 0.410 | 0.326 |
+| W4A32 | 44.30 | 0.511 | 1.515 | 64.36 | 0.368 | 0.297 |
+| W32A4 | 36.58 | 0.661 | 2.223 | 0.11 | 2.223 | 5.213 |
+
+- DeiT-Tiny는 활성값 4·5비트에서 최종 출력 NMSE가 2.1~2.2로 거의 같아짐(정확도도 거의 0). NMSE가 포화돼서 이 구간 비교는 KL이 나음
+
+단위별 (rank 5,000장). 최종 출력 오차 감소량 = 전 단위 양자화 상태의 최종 출력 NMSE − 단위 i만 FP32로 되돌렸을 때의 값
+
+| 모델 | 조건 | 전 단위 양자화 최종 NMSE | 감소량 상위 3 | 복원 이득 상위 3 |
+|---|---|---|---|---|
+| ResNet-18 | W4A4 | 1.169 | stem 0.41, layer2.0 0.21, layer4.0 0.20 | stem, layer1.0, layer2.0 |
+| ResNet-18 | W5A5 | 0.259 | stem 0.13, layer1.0 0.05, layer4.0 0.02 | stem, layer1.0, layer2.0 |
+| DeiT-Tiny | W4A4 | 2.226 | block6 0.60, block7 0.52, block5 0.38 | (전부 0.2%p 이하) |
+| DeiT-Tiny | W5A5 | 2.140 | block9 0.22, block8 0.17, patch_embed 0.10 | block9, block8, block11 |
+| DeiT-Tiny | W6A6 | 0.725 | block10 0.13, block11 0.11, block9 0.11 | block9, patch_embed, block11 |
+
+순위 상관 (Spearman ρ)
+
+| 모델 | 조건 | 단위 누적 NMSE vs 최종 출력 오차 감소량 | 최종 출력 오차 감소량 vs 복원 이득 | KL 감소량 vs 복원 이득 | 그 단위만 양자화했을 때 최종 출력 KL vs 단독 하락 |
+|---|---|---|---|---|---|
+| ResNet-18 | W4A4 | -0.52 | 0.55 | 0.93 | 0.97 |
+| ResNet-18 | W5A5 | -0.56 | 0.67 | 0.83 | 0.59 |
+| DeiT-Tiny | W4A4 | -0.26 | -0.08 | 0.15 | 0.96 |
+| DeiT-Tiny | W5A5 | 0.05 | 0.90 | 0.99 | 0.92 |
+| DeiT-Tiny | W6A6 | 0.30 | 0.81 | 0.85 | 0.88 |
+
+- ResNet-18도 6-Conv처럼 단위 출력 오차가 큰 뒤쪽 단위보다 stem을 되돌릴 때 최종 출력 오차가 가장 많이 줄어듦
+- 최종 출력 KL 감소량은 복원 이득(정확도)과 순위가 잘 맞음 (DeiT-Tiny W4A4 제외. 이 조건은 정확도가 0에 가까워서 복원 이득 자체가 잡음)
+- DeiT-Tiny W4A4는 정확도로는 단위 차이가 안 보였는데, 최종 출력 오차로 보면 block5~7을 되돌릴 때 많이 줄어듦. 정확도가 무너진 조건에서도 단위를 비교할 수 있음
+- DeiT-Tiny는 단위 출력 누적 NMSE와 최종 출력 오차 감소량 순위가 거의 무관함(ρ -0.26 ~ 0.30)
+- 최종 출력 오차는 정답 라벨 없이 잴 수 있어서, 보정 데이터만으로 중요한 단위를 고르는 기준으로 쓸 수 있음. Mixed 정책 비교 결과는 아래
+- 전체 표: `results/imagenet/summary/output_conditions.csv`, `output_units.csv`, `output_rank_corr.csv`
+
+## 최종 출력 오차를 Mixed 정책 기준으로 쓰기
+
+복원했을 때 최종 출력 오차가 많이 줄어드는 층(단위)부터 8비트로 올리는 정책 2개를 추가함. 기준 순위는 다른 정책처럼 rank 묶음에서만 정하고 test로 평가.
+
+- 최종 출력 NMSE 감소 순위 (ImageNet 정책 이름 `out`)
+- 최종 출력 KL 감소 순위 (`out_kl`)
+- 복원 이득·단독 하락은 정답 라벨이 있어야 계산되는데, 이 두 개는 FP32 출력이랑만 비교해서 라벨이 필요 없음. 측정에 드는 순전파 횟수는 복원 이득과 같음
+
+6-Conv, 상위 k개 층만 8비트 (test 정답률 %, 세 과제 평균, 5 seed). 64조합은 이미 다 평가돼 있어서 새로 돌리지 않고 찾아서 씀
+
+| 층 고르는 기준 | k=1 | k=2 | k=3 |
+|---|---|---|---|
+| 최종 출력 KL 감소 | 76.17 | 91.40 | 96.45 |
+| 최종 출력 NMSE 감소 | 76.16 | 89.14 | 94.94 |
+| 복원 이득 | 76.17 | 90.66 | 95.10 |
+| 앞층부터 | 73.98 | 82.99 | 94.89 |
+| 누적 NMSE | 58.14 | 62.80 | 77.58 |
+| 무작위 조합 평균 | 67.36 | 75.51 | 84.33 |
+| rank 전수 조사 최적 | 78.44 | 93.08 | 97.99 |
+
+같은 예산(평균 5·6·7비트)으로 고를 때는 다른 순위 기준들과 거의 같은 조합이 나와서 차이 없음 (98.67, 100.00, 99.97). 표는 `results/6conv_fold/summary/output_mixed.csv`
+
+ImageNet, 상위 3개 단위만 8비트 (test 정답률 %, 괄호는 평균 가중치 비트)
+
+| 모델 · 기준 비트 | 최종 출력 KL 감소 | 최종 출력 NMSE 감소 | 복원 이득 | 단독 하락 | 앞쪽부터 | 누적 NMSE |
+|---|---|---|---|---|---|---|
+| ResNet-18 W4A4 (17.13) | 54.80 (4.11) | 46.96 (5.34) | 54.80 (4.11) | 54.80 (4.11) | 50.05 (4.05) | 19.26 (7.05) |
+| ResNet-18 W5A5 (58.52) | 67.73 (5.08) | 67.02 (5.96) | 67.73 (5.08) | 67.23 (5.32) | 67.37 (5.04) | 59.86 (7.46) |
+| DeiT-Tiny W5A5 (6.75) | 32.93 (5.70) | 33.44 (5.55) | 32.93 (5.70) | 23.96 (5.55) | 18.85 (5.55) | 24.57 (5.57) |
+| DeiT-Tiny W6A6 (62.33) | 65.51 (6.47) | 65.51 (6.47) | 66.10 (6.37) | 66.50 (6.37) | 65.66 (6.37) | 64.66 (6.38) |
+
+- KL 감소 기준은 ResNet-18 두 조건, DeiT-Tiny W5A5에서 복원 이득 기준이랑 같은 단위를 고름 (ResNet stem·layer1.0·layer2.0, DeiT block8·9·11). 라벨 없이 같은 결과가 나온다는 뜻
+- NMSE 감소 기준은 ResNet에서 layer4.0을 골라서(가중치가 많은 단위) 비트는 더 쓰고 정확도는 낮음. DeiT-Tiny W5A5에서는 33.44로 제일 높음
+- DeiT-Tiny W6A6은 모든 정책이 64~67% 사이라 구분이 어려움. 여기서는 최종 출력 기준이 단독 하락·복원 이득보다 1%p 정도 낮음
+- 상위 k개 비교라 정책마다 비트 비용이 다름. 같은 저장 비용 조건 비교는 아직 안 함
+- ImageNet은 1회 측정
+- 표는 `results/imagenet/summary/mixed_topk.csv` (정책 `out`, `out_kl`)
