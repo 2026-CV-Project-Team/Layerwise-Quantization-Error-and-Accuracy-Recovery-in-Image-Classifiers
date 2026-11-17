@@ -286,6 +286,10 @@ python -m src.output_summary
 # 정책별 상위 k 단위 8비트 승격 (최종 출력 기준 out, out_kl은 output_units.csv가 있어야 함)
 python -m src.exp_imagenet_mixed --models resnet18 --bases W4A4 W5A5
 python -m src.exp_imagenet_mixed --models deit_tiny --bases W5A5 W6A6
+
+# 보정 세트 반복 측정 (보정 seed 하나에 2시간 정도, 받기 -> 전처리 -> 위 단계 전부 -> 집계)
+python -m src.exp_imagenet_repeat --seeds 1 2 3 4
+python -m src.exp_imagenet_repeat --summary-only   # 집계만
 ```
 
 ### 설정
@@ -399,6 +403,24 @@ ResNet-18 W4A4 단위별 결과 (rank 5,000장, 전체 양자화 16.92%)
 - DeiT-Tiny는 단위 출력 누적 NMSE와 최종 출력 오차 감소량 순위가 거의 무관함(ρ -0.26 ~ 0.30)
 - 최종 출력 오차는 정답 라벨 없이 잴 수 있어서, 보정 데이터만으로 중요한 단위를 고르는 기준으로 쓸 수 있음. Mixed 정책 비교 결과는 아래
 - 전체 표: `results/imagenet/summary/output_conditions.csv`, `output_units.csv`, `output_rank_corr.csv`
+
+### 보정 세트 반복 측정 (중간, seed 0·1)
+
+사전학습 모델은 고정이라 실행마다 바뀌는 건 보정 이미지 2,048장뿐임. 그래서 보정 세트만 seed를 바꿔 새로 뽑고(train 묶음이 겹치지 않게) 같은 실험을 다시 돌림. rank/test는 그대로.
+원래 seed 0~4 다섯 개를 돌리려 했는데 노트북 발열 때문에 seed 1에서 멈춤. seed 1은 조건별 정확도, 단위별 복원·교체, 최종 출력 오차까지 끝났고 정책별 승격(mixed)은 안 끝남. 그래서 아래는 seed 2개 결과라 잠정임.
+
+조건별 test 정확도 (%), seed 0 / seed 1
+
+| 모델 | W8A8 | W6A6 | W5A5 | W4A4 | W32A4 | W4A32 |
+|---|---|---|---|---|---|---|
+| ResNet-18 | 68.94 / 68.98 | 67.25 / 67.41 | 58.52 / 57.59 | 17.13 / 14.00 | 36.58 / 32.68 | 44.30 / 44.30 |
+| DeiT-Tiny | 71.47 / 71.35 | 62.33 / 61.61 | 6.75 / 5.80 | 0.13 / 0.10 | 0.11 / 0.19 | 64.36 / 64.36 |
+
+- W만 양자화(W4A32)는 보정이랑 상관없어서 완전히 같음. 흔들리는 건 활성값 쪽이고, A 4비트에서 3~4%p까지 차이 남
+- 복원 이득 1위 단위는 두 seed 모두 같음: ResNet-18 stem(W4A4 16.75 ± 2.93%p, W5A5 6.17 ± 0.30%p), DeiT-Tiny block9(W5A5 9.29 ± 0.18%p, W6A6 1.65 ± 0.41%p)
+- ρ(누적 NMSE vs 복원 이득): ResNet-18 W4A4 -0.94 / -0.82, W5A5 -0.63 / -0.60로 음의 상관 유지. DeiT-Tiny는 -0.06 ~ 0.27로 두 seed 모두 유의하지 않음
+- 아직 못 본 것: 정책별 승격 결과가 보정 세트를 바꿔도 같은지, seed 3개 이상에서의 편차
+- 표: `results/imagenet_calib/summary/` (conditions_repeat, units_repeat, rank_corr_seeds, rank_corr_repeat). seed 1 원본 요약은 `results/imagenet_calib/s1/summary/`
 
 ## 최종 출력 오차를 Mixed 정책 기준으로 쓰기
 
