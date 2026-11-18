@@ -291,6 +291,10 @@ python -m src.exp_imagenet_mixed --models deit_tiny --bases W5A5 W6A6
 python -m src.exp_imagenet_propagation --models resnet18 deit_tiny
 python -m src.propagation_summary
 python -m src.figures_propagation
+
+# DeiT-Tiny 블록 출력 범위를 토큰·채널별로 나누기 (rank 앞쪽 2,000장 5분 정도, test는 고른 방식만 10분 정도)
+python -m src.exp_deit_tokens
+python -m src.exp_deit_tokens --test --variants tensor_minmax cls_mixed channel_minmax clsch2_minmax
 ```
 
 ### 설정
@@ -534,4 +538,58 @@ rank 앞쪽 2,000장만 썼고(발열 때문에 줄임) 보정 세트는 하나(
 - 무작위 조합은 전수가 아님. ResNet-18 1,024조합 전수로 예측을 검증하는 건 아직 안 함
 - 분위수 보정은 표본 160만 개로 한 근사
 - 표: `results/imagenet_propagation/summary/` (units, matrix, rank_corr, additivity, additivity_family, split, calib, sixconv)
+
+## DeiT-Tiny: cls 토큰과 채널에 범위를 따로 주기
+
+오차 전달 분석에서 "범위 하나로는 cls 토큰과 patch 토큰을 둘 다 못 맞추는 것 같다"고 한 걸 확인한 실험.
+W는 그대로 두고 블록 출력 A의 범위만 바꿈. 방식 비교는 rank 앞쪽 2,000장, 그중 고른 4개만 test 1만 장으로 다시 평가함. 보정 세트 1개, 측정 1회라 잠정임.
+
+### 블록 출력에서 cls 토큰과 patch 토큰의 값 범위 (보정 2,048장)
+
+| 블록 | cls 최댓값 | patch 최댓값 | patch 99.99 백분위수 |
+|---|---|---|---|
+| block0 | 15.3 | 8.8 | 4.0 |
+| block4 | 11.5 | 5.4 | 3.1 |
+| block8 | 10.9 | 19.3 | 12.5 |
+| block11 | 10.9 | 26.7 | 18.7 |
+
+- 앞쪽 블록(block0~5)은 cls 토큰 값이 patch보다 훨씬 큼. 범위를 분위수로 자르면 cls가 잘려 나감
+- 뒤쪽 블록(block8~11)은 patch 값이 더 커서 범위가 patch에 맞춰지고, cls는 그 넓은 범위의 눈금으로 양자화됨
+- 전체 표: `results/deit_tokens/summary/ranges.csv`
+
+### 범위 방식별 정확도
+
+rank 앞쪽 2,000장 (FP32 72.60%)
+
+| 방식 | 블록당 범위 수 | W4A4 | W5A5 | W6A6 | W8A8 |
+|---|---|---|---|---|---|
+| 범위 하나, min-max (기본 규칙) | 1 | 0.05 | 6.55 | 62.05 | 72.30 |
+| 범위 하나, 99.99 백분위수 | 1 | 0.65 | 31.75 | 51.35 | 56.75 |
+| cls 1개 + patch 1개, 둘 다 min-max | 2 | 0.80 | 51.70 | 69.50 | 72.40 |
+| cls min-max + patch 99.99 백분위수 | 2 | 5.95 | 57.90 | 70.30 | 72.10 |
+| 토큰 위치마다 | 197 | 4.00 | 58.30 | 69.35 | 72.25 |
+| 채널마다 | 192 | 35.10 | 67.50 | 71.30 | 72.55 |
+| cls 1개 + patch 채널마다 | 193 | 27.95 | 63.75 | 70.75 | 72.60 |
+| cls 채널마다 + patch 채널마다 | 384 | 43.75 | 67.90 | 71.15 | 72.25 |
+
+test 1만 장 (FP32 71.90%, rank에서 고른 4개만)
+
+| 방식 | W4A4 | W5A5 | W6A6 | W8A8 |
+|---|---|---|---|---|
+| 범위 하나, min-max (기본 규칙) | 0.13 | 6.75 | 62.33 | 71.47 |
+| cls min-max + patch 99.99 백분위수 | 5.17 | 58.10 | 68.33 | 71.55 |
+| 채널마다 | 33.22 | 65.50 | 70.44 | 71.70 |
+| cls 채널마다 + patch 채널마다 | 43.01 | 67.25 | 70.59 | 71.78 |
+
+- cls 토큰에 범위 하나만 따로 줘도 W5A5가 6.75 -> 58.10%, W6A6이 62.33 -> 68.33%로 올라옴(test). 토큰 위치마다 범위를 준 것(rank 58.30%)과 같은 수준이라, 토큰별 범위의 효과는 대부분 cls 하나에서 나오는 것으로 보임
+- 4비트는 cls 분리만으로는 안 되고(5.17%) 채널별 범위가 필요함(33.22%). 채널 간 범위 차이는 FQ-ViT가 이미 지적한 문제
+- 둘을 합치면 4비트에서 43.01%로 가장 높음. cls 분리와 채널 분리가 서로 다른 부분을 잡는 것으로 보임. 대신 cls도 채널별로 줘야 하고, cls에 범위 하나만 주고 patch만 채널별로 하면 채널별만 쓴 것보다 낮음(rank 27.95 vs 35.10%)
+- 전부 W5A5로 양자화했을 때 block11 출력의 cls 토큰 오차(NMSE): 범위 하나 1.31 -> cls 분리 0.50~0.74 -> 채널별 0.26 -> 둘 다 0.16 (`tokens.csv`)
+
+### 관련 연구와 한계
+
+- cls 토큰이 양자화에 취약하다는 건 PTQ4VM(Visual Mamba)이, 토큰 이상치가 범위를 부풀린다는 건 RegCache(CLIP, DINOv2 등)가, 채널 간 범위 차이는 FQ-ViT가 이미 다룸. 여기서 한 건 지도학습 DeiT에서 층별 복원 -> 오차 전달 -> 토큰별 오차 순서로 원인을 좁히고, cls 하나만 분리한 최소 방식이 토큰별·채널별 방식에 비해 어느 정도인지 비교한 것
+- 모의 양자화라 정확도만 봄. 토큰별·채널별 범위를 실제 정수 연산에 쓰려면 뒤 연산(LayerNorm, 행렬곱)에서 scale을 맞추는 비용이 생기는데 그건 따지지 않음
+- DeiT-Tiny 하나, 보정 세트 1개, 측정 1회. rank 2,000장으로 방식을 고른 뒤 test를 평가함
+- cls + patch 분위수 방식의 분위수는 표본 근사
 
