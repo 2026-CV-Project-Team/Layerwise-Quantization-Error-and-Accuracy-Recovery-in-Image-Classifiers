@@ -47,6 +47,8 @@ class UnitQuantizer:
         self.a_q: list[tuple | None] = [None] * n  # (scale, zero, q_max)
         self.ranges: list[torch.Tensor] | None = None
         self.observe: list[torch.Tensor] | None = None  # 보정 중일 때 단위별 [min, max] 누적
+        self.sample: list[list[torch.Tensor]] | None = None  # percentile 보정 중일 때 단위별 표본 값
+        self.sample_n, self.sample_gen = 0, None
         self.capture: list[torch.Tensor] | None = None  # NMSE 계산용 단위별 출력 수집
         self.w_table: dict[int, list[list[torch.Tensor]]] = {}
         for u in units:
@@ -63,6 +65,11 @@ class UnitQuantizer:
                 # 보정은 양자화를 모두 끈 FP32 순전파에서 수행한다
                 lo, hi = self.observe[i]
                 self.observe[i] = torch.stack([torch.minimum(lo, output.min()), torch.maximum(hi, output.max())])
+            if self.sample is not None:
+                # 활성값 전체는 너무 커서(stem 출력이 배치당 5천만 개) 무작위로 일부만 뽑아 CPU에 모은다
+                flat = output.detach().flatten()
+                idx = torch.randint(flat.numel(), (min(self.sample_n, flat.numel()),), generator=self.sample_gen)
+                self.sample[i].append(flat[idx.to(flat.device)].float().cpu())
             if self.a_q[i] is not None:
                 output = fake_quant_act(output, *self.a_q[i])
             if self.capture is not None:
@@ -83,6 +90,33 @@ class UnitQuantizer:
         self.ranges, self.observe = self.observe, None
         self.set_ranges(self.ranges)
         return self.ranges
+
+    @torch.no_grad()
+    def calibrate_percentile(self, batch_iter, pct: float, n_per_batch: int = 200_000, seed: int = 0) -> list[torch.Tensor]:
+        """min-max 대신 분위수로 활성값 범위를 정한다: [100 − pct, pct] 백분위수.
+
+        min-max는 보정 이미지 몇 장의 극단값이 범위를 정해 버린다. 분위수 범위는 극단값을 잘라내는 대신
+        (clipping 오차) 눈금 간격을 좁힌다(반올림 오차 감소). 기본 규칙은 여전히 min-max이고,
+        이 함수는 "결론이 보정 방법에 따라 달라지는가"를 확인하는 용도다.
+
+        근사: 배치마다 단위 출력에서 n_per_batch개를 무작위로 뽑아 모은 표본의 분위수를 쓴다.
+        2,048장(8배치)이면 표본 160만 개라 99.99 백분위수 위에 약 160개가 남는다(잠정, 정밀 추정은 아님).
+        """
+        n = len(self.units)
+        self.apply([None] * n, [None] * n)
+        self.sample, self.sample_n = [[] for _ in range(n)], n_per_batch
+        self.sample_gen = torch.Generator().manual_seed(seed)  # 표본 위치를 고정해 실행마다 같은 범위가 나오게 함
+        for x in batch_iter:
+            self.model(x)
+        samples, self.sample = self.sample, None
+        device = self.units[0].fp[0].device
+        ranges = []
+        for values in samples:
+            v = torch.cat(values)
+            q = torch.quantile(v, torch.tensor([1 - pct / 100, pct / 100]))
+            ranges.append(q.to(device))
+        self.set_ranges(ranges)
+        return ranges
 
     def set_ranges(self, ranges: list[torch.Tensor]) -> None:
         """저장해 둔 보정 범위로 활성값 양자화 파라미터를 다시 만든다(재보정 없이 이어서 실험할 때)."""
