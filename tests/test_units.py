@@ -50,6 +50,16 @@ class UnitTest(unittest.TestCase):
         self.assertTrue(torch.allclose(out, expected, atol=1e-3))
         self.assertTrue(torch.equal(out.argmax(1), expected.argmax(1)))
 
+    def test_percentile_range_inside_minmax(self):
+        # 분위수 범위는 min-max 범위 안에 있어야 하고, 100 백분위수는 표본의 최솟값·최댓값이라 min-max를 넘지 않는다
+        model, units, q, x, _ = self.make("resnet18")
+        minmax = [r.clone() for r in q.ranges]
+        pct = q.calibrate_percentile([x], 99.0, n_per_batch=50_000)
+        for (lo, hi), (plo, phi), u in zip(minmax, pct, units):
+            self.assertGreaterEqual(float(plo), float(lo) - 1e-6, u.name)
+            self.assertLessEqual(float(phi), float(hi) + 1e-6, u.name)
+        self.assertLess(float(pct[0][1]), float(minmax[0][1]))  # stem 출력은 꼬리가 길어 99%에서 확실히 줄어든다
+
     def test_unit_counts(self):
         for name, n in (("resnet18", 10), ("deit_tiny", 14)):
             _, units = load_model(name, pretrained=False)
