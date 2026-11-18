@@ -32,7 +32,7 @@ import pandas as pd
 import torch
 
 from .exp_imagenet import ROOT, parse_condition, pick_device, predict
-from .imagenet_data import load_split, to_input
+from .imagenet_data import load_split, set_calib_seed, to_input
 from .imagenet_models import MODELS, load_model, unit_param_counts
 from .quant.units import UnitQuantizer
 
@@ -108,9 +108,12 @@ def main() -> None:
     p.add_argument("--models", nargs="+", default=list(MODELS))
     p.add_argument("--bases", nargs="+", default=["W4A4"])
     p.add_argument("--out", default="results/imagenet")
+    # 반복 측정용 보정 세트 번호 (0 = 기존 세트). 결과는 --out으로 다른 폴더에 둔다
+    p.add_argument("--calib-seed", type=int, default=0)
     # 일부 정책만 다시 돌릴 때. 예: --policies out out_kl (나머지 정책의 기존 행은 그대로 둔다)
     p.add_argument("--policies", nargs="+", default=["base", "random", *POLICIES])
     args = p.parse_args()
+    set_calib_seed(args.calib_seed)
     summary = ROOT / args.out / "summary"
     units_table = pd.read_csv(summary / "units.csv")
     if (summary / "output_units.csv").exists():  # out, out_kl 정책용 열

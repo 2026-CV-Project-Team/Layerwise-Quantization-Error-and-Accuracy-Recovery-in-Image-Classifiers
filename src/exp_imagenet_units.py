@@ -27,7 +27,7 @@ import torch
 from scipy.stats import spearmanr
 
 from .exp_imagenet import ROOT, parse_condition, pick_device, predict
-from .imagenet_data import load_split, to_input
+from .imagenet_data import load_split, set_calib_seed, to_input
 from .imagenet_models import MODELS, load_model, unit_param_counts
 from .quant.units import UnitQuantizer
 
@@ -135,7 +135,10 @@ def main() -> None:
     p.add_argument("--models", nargs="+", default=list(MODELS))
     p.add_argument("--conditions", nargs="+", default=["W4A4"])
     p.add_argument("--out", default="results/imagenet")
+    # 반복 측정용 보정 세트 번호 (0 = 기존 세트). 결과는 --out으로 다른 폴더에 둔다
+    p.add_argument("--calib-seed", type=int, default=0)
     args = p.parse_args()
+    set_calib_seed(args.calib_seed)
     device = pick_device()
     out_root = ROOT / args.out
     rows = []
