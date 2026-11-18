@@ -31,7 +31,7 @@
 출력: results/imagenet_propagation/{모델}/ 아래 matrix.csv, evals.csv, units.csv, ranges.json
 집계: python -m src.propagation_summary
 
-실행 예 (M4 MPS 기준 ResNet-18 15분, DeiT-Tiny 45분 정도)
+실행 예 (M4 MPS 기준 ResNet-18 20분, DeiT-Tiny 25분 정도)
     python -m src.exp_imagenet_propagation --models resnet18 deit_tiny
 """
 from __future__ import annotations
